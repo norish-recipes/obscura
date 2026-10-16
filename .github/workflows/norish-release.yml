@@ -110,14 +110,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake clang libclang-dev llvm-dev
 
+      - uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d # v2
+        with:
+          tool: nextest
+
+      # As upstream's CI runs them: one process per test, under the default SSRF policy, and the
+      # gzip fixture alone allowed onto loopback. The patches' own fixtures allow it per client.
       - name: Test what the patches touch
         working-directory: src
-        # The proxy fixtures listen on loopback.
-        env:
-          OBSCURA_ALLOW_PRIVATE_NETWORK: "1"
         run: |
-          cargo test -p obscura-net --features stealth --lib
-          cargo test -p obscura-cdp --lib domains::network
+          cargo nextest run -p obscura-net --features stealth --no-fail-fast -- --skip stealth_client_decodes_gzip_response
+          OBSCURA_ALLOW_PRIVATE_NETWORK=1 cargo nextest run -p obscura-net --features stealth stealth_client_decodes_gzip_response
+          cargo nextest run -p obscura-cdp --no-fail-fast domains::network
 
   build:
     needs: plan
