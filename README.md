@@ -9,7 +9,8 @@ upstream's render+stealth release with the patches in `patches/` applied, and no
 
 - **`0001`:** `Network.setExtraHTTPHeaders` reaches the stealth client, which upstream's stealth
   build never gave the headers, and takes an optional `scopeDomain`. With one, a request whose host
-  is not on that domain carries none of the headers, checked on every redirect hop.
+  is not on that domain carries none of the headers, checked on every redirect hop. The reply
+  echoes `scopeDomain`, so a client can tell this build from one that would send them anywhere.
 
 ## Releases
 

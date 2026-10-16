@@ -1,4 +1,4 @@
-From 5d44de77631214fe53347e7a1dee1f5f112b522e Mon Sep 17 00:00:00 2001
+From 5309db1690d50d2378eebd45ad03b176e676c755 Mon Sep 17 00:00:00 2001
 From: Mike van Es <github@depiraten.com>
 Date: Fri, 16 Oct 2026 11:20:16 +0200
 Subject: [PATCH] Send a page's extra headers through the stealth client too,
@@ -7,13 +7,13 @@ Subject: [PATCH] Send a page's extra headers through the stealth client too,
 ---
  crates/obscura-browser/src/lib.rs             |   1 +
  .../obscura-browser/src/page_header_scope.rs  |  25 ++++
- crates/obscura-cdp/src/domains/network.rs     |  31 +++-
+ crates/obscura-cdp/src/domains/network.rs     |  41 +++++-
  crates/obscura-net/src/client.rs              |  34 +++--
  crates/obscura-net/src/cookies.rs             |   2 +-
  crates/obscura-net/src/header_scope.rs        | 133 ++++++++++++++++++
  crates/obscura-net/src/lib.rs                 |   1 +
  crates/obscura-net/src/wreq_client.rs         |  27 +++-
- 8 files changed, 242 insertions(+), 12 deletions(-)
+ 8 files changed, 251 insertions(+), 13 deletions(-)
  create mode 100644 crates/obscura-browser/src/page_header_scope.rs
  create mode 100644 crates/obscura-net/src/header_scope.rs
 
@@ -60,15 +60,17 @@ index 0000000..e35d6f1
 +    }
 +}
 diff --git a/crates/obscura-cdp/src/domains/network.rs b/crates/obscura-cdp/src/domains/network.rs
-index 1973609..ef19009 100644
+index 1973609..048fa1a 100644
 --- a/crates/obscura-cdp/src/domains/network.rs
 +++ b/crates/obscura-cdp/src/domains/network.rs
-@@ -44,13 +44,15 @@ pub async fn handle(
+@@ -44,16 +44,24 @@ pub async fn handle(
          }
          "setExtraHTTPHeaders" => {
              let headers = params.get("headers").and_then(|v| v.as_object());
-+            // Fork-only: an optional `scopeDomain` sends them only to hosts on that domain.
++            // Fork-only: an optional `scopeDomain` sends them only to hosts on that domain, and the
++            // reply echoes it, so a client can tell this build from one that would send them anywhere.
 +            let scope = params.get("scopeDomain").and_then(|v| v.as_str()).map(str::to_string);
++            let mut applied = None;
              if let Some(page) = ctx.get_session_page(session_id) {
                  if let Some(headers) = headers {
                      let header_map: std::collections::HashMap<String, String> = headers
@@ -76,11 +78,19 @@ index 1973609..ef19009 100644
                          .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
                          .collect();
 -                    page.http_client.set_extra_headers(header_map).await;
-+                    page.set_extra_headers_scoped(header_map, scope).await;
++                    page.set_extra_headers_scoped(header_map, scope.clone()).await;
++                    applied = scope;
                  }
              }
-             Ok(json!({}))
-@@ -250,6 +252,33 @@ mod tests {
+-            Ok(json!({}))
++            Ok(match applied {
++                Some(scope) => json!({ "scopeDomain": scope }),
++                None => json!({}),
++            })
+         }
+         "setUserAgentOverride" => {
+             let ua = params.get("userAgent").and_then(|v| v.as_str()).unwrap_or("");
+@@ -250,6 +258,35 @@ mod tests {
          assert!(ctx.default_context.cookie_jar.get_all_cookies().is_empty());
      }
  
@@ -91,7 +101,7 @@ index 1973609..ef19009 100644
 +        let session_id = Some("session-1".to_string());
 +        ctx.sessions.insert(session_id.clone().unwrap(), page_id.clone());
 +
-+        handle(
++        let reply = handle(
 +            "setExtraHTTPHeaders",
 +            &json!({ "headers": { "Authorization": "Bearer t" }, "scopeDomain": "example.com" }),
 +            &mut ctx,
@@ -99,6 +109,8 @@ index 1973609..ef19009 100644
 +        )
 +        .await
 +        .expect("setExtraHTTPHeaders must succeed for a session page");
++
++        assert_eq!(reply, json!({ "scopeDomain": "example.com" }));
 +
 +        let page = ctx.get_page(&page_id).unwrap();
 +        assert_eq!(
