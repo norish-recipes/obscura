@@ -21,3 +21,6 @@ upstream tag with `patches/` applied by `apply-patches.sh`.
 `.github/workflows/norish-release.yml` checks upstream every day and builds a release it hasn't
 built yet. A push to this branch builds and tests without publishing. Bump `REVISION` when the
 patches change. When they stop applying to a new upstream release, the workflow opens an issue.
+
+To change a patch, apply them to an upstream tag (`./apply-patches.sh v0.2.4 src`), commit the
+change in `src`, and write the series back with `git -C src format-patch v0.2.4 -o ../patches`.
