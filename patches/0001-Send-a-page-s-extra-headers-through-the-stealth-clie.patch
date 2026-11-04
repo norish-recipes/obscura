@@ -1,4 +1,4 @@
-From 43853a64eb0c05f5cd483703f5fed38953bf5b97 Mon Sep 17 00:00:00 2001
+From 41889f20c3e7a1952175062977a4b34e8f14fbf9 Mon Sep 17 00:00:00 2001
 From: Mike van Es <github@depiraten.com>
 Date: Fri, 16 Oct 2026 11:20:16 +0200
 Subject: [PATCH] Send a page's extra headers through the stealth client too,
@@ -6,14 +6,14 @@ Subject: [PATCH] Send a page's extra headers through the stealth client too,
 
 ---
  crates/obscura-browser/src/lib.rs             |   1 +
- .../obscura-browser/src/page_header_scope.rs  |  25 ++++
- crates/obscura-cdp/src/domains/network.rs     |  41 +++++-
- crates/obscura-net/src/client.rs              |  34 +++--
+ .../obscura-browser/src/page_header_scope.rs  |  25 ++
+ crates/obscura-cdp/src/domains/network.rs     |  41 +++-
+ crates/obscura-net/src/client.rs              |  38 ++-
  crates/obscura-net/src/cookies.rs             |   2 +-
- crates/obscura-net/src/header_scope.rs        | 133 ++++++++++++++++++
+ crates/obscura-net/src/header_scope.rs        | 230 ++++++++++++++++++
  crates/obscura-net/src/lib.rs                 |   1 +
- crates/obscura-net/src/wreq_client.rs         |  27 +++-
- 8 files changed, 251 insertions(+), 13 deletions(-)
+ crates/obscura-net/src/wreq_client.rs         |  29 ++-
+ 8 files changed, 348 insertions(+), 19 deletions(-)
  create mode 100644 crates/obscura-browser/src/page_header_scope.rs
  create mode 100644 crates/obscura-net/src/header_scope.rs
 
@@ -61,7 +61,7 @@ index 0000000..e35d6f1
 +    }
 +}
 diff --git a/crates/obscura-cdp/src/domains/network.rs b/crates/obscura-cdp/src/domains/network.rs
-index 1973609..048fa1a 100644
+index e5711ca..a05ca91 100644
 --- a/crates/obscura-cdp/src/domains/network.rs
 +++ b/crates/obscura-cdp/src/domains/network.rs
 @@ -44,16 +44,24 @@ pub async fn handle(
@@ -128,10 +128,10 @@ index 1973609..048fa1a 100644
      async fn set_blocked_urls_targets_session_page_without_enabling_interception() {
          let mut ctx = CdpContext::new();
 diff --git a/crates/obscura-net/src/client.rs b/crates/obscura-net/src/client.rs
-index b4db284..ed814cf 100644
+index 64aa618..3f89b2d 100644
 --- a/crates/obscura-net/src/client.rs
 +++ b/crates/obscura-net/src/client.rs
-@@ -841,6 +841,8 @@ pub struct ObscuraHttpClient {
+@@ -849,6 +849,8 @@ pub struct ObscuraHttpClient {
      pub user_agent: RwLock<String>,
      pub accept_language: RwLock<String>,
      pub extra_headers: RwLock<HashMap<String, String>>,
@@ -140,7 +140,7 @@ index b4db284..ed814cf 100644
      pub interceptor: RwLock<Option<Box<dyn RequestInterceptor + Send + Sync>>>,
      pub timeout: Duration,
      pub in_flight: Arc<std::sync::atomic::AtomicU32>,
-@@ -1056,6 +1058,7 @@ impl ObscuraHttpClient {
+@@ -1067,6 +1069,7 @@ impl ObscuraHttpClient {
              ),
              accept_language: RwLock::new("en-US,en;q=0.9".to_string()),
              extra_headers: RwLock::new(HashMap::new()),
@@ -148,7 +148,7 @@ index b4db284..ed814cf 100644
              interceptor: RwLock::new(None),
              in_flight: Arc::new(std::sync::atomic::AtomicU32::new(0)),
              timeout: Duration::from_secs(30),
-@@ -1189,13 +1192,12 @@ impl ObscuraHttpClient {
+@@ -1209,13 +1212,12 @@ impl ObscuraHttpClient {
          {
              return None;
          }
@@ -168,22 +168,33 @@ index b4db284..ed814cf 100644
          extra_headers.sort();
          if extra_headers.iter().any(|(name, value)| {
              name == "authorization"
-@@ -1543,7 +1545,13 @@ impl ObscuraHttpClient {
+@@ -1581,9 +1583,14 @@ impl ObscuraHttpClient {
                  }
              }
  
--            for (k, v) in self.extra_headers.read().await.iter() {
-+            let extra_headers = crate::header_scope::extra_headers_for(
+-            let extra_headers = self.extra_headers.read().await;
+-            let supplied = request_headers.as_ref();
+-            for (k, v) in supplied.unwrap_or(&extra_headers).iter() {
++            let headers_to_send = crate::header_scope::request_headers_for(
++                request_headers.as_ref(),
 +                &self.extra_headers,
 +                &self.extra_headers_scope,
 +                &current_url,
 +            )
 +            .await;
-+            for (k, v) in extra_headers.iter() {
++            for (k, v) in headers_to_send.iter() {
                  if let (Ok(name), Ok(val)) = (
                      HeaderName::from_bytes(k.as_bytes()),
                      HeaderValue::from_str(v),
-@@ -1664,7 +1672,17 @@ impl ObscuraHttpClient {
+@@ -1601,7 +1608,6 @@ impl ObscuraHttpClient {
+                 headers.remove(reqwest::header::ORIGIN);
+             }
+ 
+-            drop(extra_headers);
+             let default_form_type = method == Method::POST && !headers.contains_key(reqwest::header::CONTENT_TYPE);
+             let mut req_builder = self.get_client().await.request(method.clone(), current_url.as_str())
+                 .headers(headers);
+@@ -1714,7 +1720,17 @@ impl ObscuraHttpClient {
      }
  
      pub async fn set_extra_headers(&self, headers: HashMap<String, String>) {
@@ -216,10 +227,10 @@ index f5e35f5..1772c9b 100644
      // Previously this allocated 2 lowercase Strings + a "." prefix
 diff --git a/crates/obscura-net/src/header_scope.rs b/crates/obscura-net/src/header_scope.rs
 new file mode 100644
-index 0000000..f92e778
+index 0000000..1a44c85
 --- /dev/null
 +++ b/crates/obscura-net/src/header_scope.rs
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,230 @@
 +//! Fork-only: extra headers scoped to one domain.
 +//!
 +//! `Network.setExtraHTTPHeaders` adds its headers to every request a page makes, so a site's
@@ -234,18 +245,46 @@ index 0000000..f92e778
 +
 +use crate::cookies::domain_matches;
 +
++async fn on_scope(scope: &RwLock<Option<String>>, url: &Url) -> bool {
++    match scope.read().await.as_deref() {
++        Some(domain) => url.host_str().is_some_and(|host| domain_matches(host, domain)),
++        None => true,
++    }
++}
++
 +/// The extra headers a request to `url` carries: all of them, or none when `url` is off `scope`.
 +pub(crate) async fn extra_headers_for(
 +    headers: &RwLock<HashMap<String, String>>,
 +    scope: &RwLock<Option<String>>,
 +    url: &Url,
 +) -> HashMap<String, String> {
-+    if let Some(domain) = scope.read().await.as_deref() {
-+        if !url.host_str().is_some_and(|host| domain_matches(host, domain)) {
-+            return HashMap::new();
-+        }
++    if on_scope(scope, url).await {
++        headers.read().await.clone()
++    } else {
++        HashMap::new()
 +    }
-+    headers.read().await.clone()
++}
++
++/// What a request to `url` sends: the headers an interception `supplied`, else the extra ones. A
++/// continued request can repeat the extra headers, so off `scope` it loses those names, any case.
++pub(crate) async fn request_headers_for(
++    supplied: Option<&HashMap<String, String>>,
++    headers: &RwLock<HashMap<String, String>>,
++    scope: &RwLock<Option<String>>,
++    url: &Url,
++) -> HashMap<String, String> {
++    let Some(supplied) = supplied else {
++        return extra_headers_for(headers, scope, url).await;
++    };
++    if on_scope(scope, url).await {
++        return supplied.clone();
++    }
++    let extra = headers.read().await;
++    supplied
++        .iter()
++        .filter(|(name, _)| !extra.keys().any(|key| key.eq_ignore_ascii_case(name)))
++        .map(|(name, value)| (name.clone(), value.clone()))
++        .collect()
 +}
 +
 +#[cfg(test)]
@@ -278,6 +317,38 @@ index 0000000..f92e778
 +        assert!(headers_for(Some("example.com"), "https://notexample.com/").await.is_empty());
 +        assert!(headers_for(Some("example.com"), "https://example.com.evil.test/").await.is_empty());
 +        assert!(headers_for(Some("example.com"), "data:text/html,hi").await.is_empty());
++    }
++
++    async fn sent_with(
++        supplied: &[(&str, &str)],
++        scope: Option<&str>,
++        url: &str,
++    ) -> HashMap<String, String> {
++        let supplied: HashMap<String, String> =
++            supplied.iter().map(|(name, value)| (name.to_string(), value.to_string())).collect();
++        let headers = RwLock::new(HashMap::from([(HEADER.0.to_string(), HEADER.1.to_string())]));
++        let scope = RwLock::new(scope.map(str::to_string));
++        request_headers_for(Some(&supplied), &headers, &scope, &Url::parse(url).unwrap()).await
++    }
++
++    #[tokio::test]
++    async fn supplied_headers_lose_the_extra_ones_off_scope_in_any_case() {
++        let sent = sent_with(
++            &[("X-Norish-Token", "secret"), ("x-own", "kept")],
++            Some("example.com"),
++            "https://other.test/",
++        )
++        .await;
++
++        assert_eq!(sent, HashMap::from([("x-own".to_string(), "kept".to_string())]));
++    }
++
++    #[tokio::test]
++    async fn supplied_headers_stay_whole_on_scope_or_without_one() {
++        let supplied = [("x-norish-token", "secret"), ("x-own", "kept")];
++
++        assert_eq!(sent_with(&supplied, Some("example.com"), "https://www.example.com/").await.len(), 2);
++        assert_eq!(sent_with(&supplied, None, "https://other.test/").await.len(), 2);
 +    }
 +
 +    /// A proxy that answers the first request with a redirect to `other.test` and the second with
@@ -338,6 +409,43 @@ index 0000000..f92e778
 +        assert_first_hop_only(&server.await.unwrap());
 +    }
 +
++    fn continued_headers() -> Option<HashMap<String, String>> {
++        Some(HashMap::from([(HEADER.0.to_string(), HEADER.1.to_string())]))
++    }
++
++    #[tokio::test]
++    async fn plain_client_drops_continued_headers_on_an_off_site_redirect() {
++        let (proxy, server) = redirecting_proxy().await;
++        let client =
++            ObscuraHttpClient::with_full_options(Arc::new(CookieJar::new()), Some(&proxy), true);
++        let (headers, scope) = scoped_header();
++
++        client.set_extra_headers_scoped(headers, scope).await;
++        let url = Url::parse("http://sub.example.com/a").unwrap();
++        let response =
++            client.fetch_navigation_request(&url, "GET", None, continued_headers(), None).await.unwrap();
++
++        assert_eq!(response.status, 200);
++        assert_first_hop_only(&server.await.unwrap());
++    }
++
++    #[cfg(feature = "stealth")]
++    #[tokio::test]
++    async fn stealth_client_drops_continued_headers_on_an_off_site_redirect() {
++        let (proxy, server) = redirecting_proxy().await;
++        let client =
++            crate::StealthHttpClient::with_proxy(Arc::new(CookieJar::new()), Some(&proxy), true);
++        let (headers, scope) = scoped_header();
++
++        client.set_extra_headers_scoped(headers, scope).await;
++        let url = Url::parse("http://sub.example.com/a").unwrap();
++        let response =
++            client.fetch_navigation_request(&url, "GET", None, continued_headers(), None).await.unwrap();
++
++        assert_eq!(response.status, 200);
++        assert_first_hop_only(&server.await.unwrap());
++    }
++
 +    #[cfg(feature = "stealth")]
 +    #[tokio::test]
 +    async fn stealth_client_sends_scoped_headers_and_drops_them_off_site() {
@@ -366,54 +474,63 @@ index 75661e5..7fa425c 100644
  pub mod robots;
  pub mod blocklist;
 diff --git a/crates/obscura-net/src/wreq_client.rs b/crates/obscura-net/src/wreq_client.rs
-index 9547d85..227d363 100644
+index e58b71f..300b78a 100644
 --- a/crates/obscura-net/src/wreq_client.rs
 +++ b/crates/obscura-net/src/wreq_client.rs
-@@ -190,6 +190,8 @@ pub struct StealthHttpClient {
+@@ -192,6 +192,8 @@ pub struct StealthHttpClient {
      pub block_trackers: bool,
      pub cookie_jar: Arc<CookieJar>,
      pub extra_headers: RwLock<HashMap<String, String>>,
 +    /// Fork-only: the domain `extra_headers` are limited to (header_scope.rs).
 +    pub extra_headers_scope: RwLock<Option<String>>,
      pub in_flight: Arc<std::sync::atomic::AtomicU32>,
+     user_agent: Option<String>,
  }
- 
-@@ -285,6 +287,7 @@ impl StealthHttpClient {
+@@ -289,6 +291,7 @@ impl StealthHttpClient {
              ),
              cookie_jar,
              extra_headers: RwLock::new(HashMap::new()),
 +            extra_headers_scope: RwLock::new(None),
              in_flight: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+             user_agent: None,
          }
-     }
-@@ -377,7 +380,13 @@ impl StealthHttpClient {
+@@ -406,9 +409,13 @@ impl StealthHttpClient {
                  req = req.header("Cookie", &cookie_header);
              }
  
--            for (k, v) in self.extra_headers.read().await.iter() {
-+            let extra_headers = crate::header_scope::extra_headers_for(
+-            let extra_headers = self.extra_headers.read().await;
+-            let supplied = request_headers.as_ref();
+-            let effective_headers = supplied.unwrap_or(&extra_headers);
++            let effective_headers = crate::header_scope::request_headers_for(
++                request_headers.as_ref(),
 +                &self.extra_headers,
 +                &self.extra_headers_scope,
 +                &current_url,
 +            )
 +            .await;
-+            for (k, v) in extra_headers.iter() {
-                 if k.eq_ignore_ascii_case("origin") {
-                     continue;
+             if let Some(ua) = effective_headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("user-agent")).map(|(_, v)| v)
+                 .or(self.user_agent.as_ref()) {
+                 req = req.header("user-agent", ua.as_str());
+@@ -436,7 +443,6 @@ impl StealthHttpClient {
                  }
-@@ -544,7 +553,10 @@ impl StealthHttpClient {
+                 req = req.body(bytes.clone());
+             }
+-            drop(extra_headers);
+             if !request_callback_fired {
+                 if let Some(callbacks) = callbacks {
+                     callbacks.fire_request(&request_info).await;
+@@ -603,7 +609,9 @@ impl StealthHttpClient {
                  req = req.header("cookie", &cookie_header);
              }
          }
--        for (k, v) in self.extra_headers.read().await.iter() {
+-        let extra_headers = self.extra_headers.read().await;
 +        let extra_headers =
 +            crate::header_scope::extra_headers_for(&self.extra_headers, &self.extra_headers_scope, url)
 +                .await;
-+        for (k, v) in extra_headers.iter() {
-             req = req.header(k.as_str(), v.as_str());
-         }
-         for (k, v) in headers.iter() {
-@@ -584,7 +596,17 @@ impl StealthHttpClient {
+         if let Some(ua) = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("user-agent")).map(|(_, v)| v)
+             .or_else(|| extra_headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("user-agent")).map(|(_, v)| v))
+             .or(self.user_agent.as_ref()) {
+@@ -650,7 +658,17 @@ impl StealthHttpClient {
      }
  
      pub async fn set_extra_headers(&self, headers: HashMap<String, String>) {
@@ -431,14 +548,14 @@ index 9547d85..227d363 100644
      }
  
      pub fn active_requests(&self) -> u32 {
-@@ -822,6 +844,7 @@ mod tests {
+@@ -934,6 +952,7 @@ mod tests {
              block_trackers: true,
              cookie_jar: Arc::new(CookieJar::new()),
              extra_headers: tokio::sync::RwLock::new(std::collections::HashMap::new()),
 +            extra_headers_scope: tokio::sync::RwLock::new(None),
              in_flight: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+             user_agent: None,
          };
-         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
 -- 
 2.50.1 (Apple Git-155)
 
