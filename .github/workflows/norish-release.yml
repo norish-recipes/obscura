@@ -3,9 +3,10 @@
 name: Norish release
 
 on:
-  # Daily: publishes each new upstream release, and a REVISION bump, within a day.
+  # Daily, around midnight in the Netherlands: publishes each new upstream release, and a REVISION
+  # bump, within a day. GitHub starts schedules late under load, lately by about 8 hours.
   schedule:
-    - cron: "23 4 * * *"
+    - cron: "7 23 * * *"
   workflow_dispatch:
     inputs:
       upstream:
