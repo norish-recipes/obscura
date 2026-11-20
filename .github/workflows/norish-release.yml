@@ -3,10 +3,7 @@
 name: Norish release
 
 on:
-  # Daily, around midnight in the Netherlands: publishes each new upstream release, and a REVISION
-  # bump, within a day. GitHub starts schedules late under load, lately by about 8 hours.
-  schedule:
-    - cron: "7 23 * * *"
+  # Run by hand before each Norish release that takes a new upstream tag or REVISION.
   workflow_dispatch:
     inputs:
       upstream:
@@ -33,9 +30,6 @@ env:
 jobs:
   plan:
     runs-on: ubuntu-22.04
-    permissions:
-      contents: write
-      issues: write
     outputs:
       upstream: ${{ steps.plan.outputs.upstream }}
       tag: ${{ steps.plan.outputs.tag }}
@@ -58,10 +52,7 @@ jobs:
           gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 && exists=true
           build=true
           publish=false
-          case "$EVENT" in
-            schedule) [ "$exists" = false ] && publish=true || build=false ;;
-            workflow_dispatch) [ "$INPUT_PUBLISH" = true ] && [ "$exists" = false ] && publish=true ;;
-          esac
+          [ "$EVENT" = workflow_dispatch ] && [ "$INPUT_PUBLISH" = true ] && [ "$exists" = false ] && publish=true
           printf 'upstream=%s\ntag=%s\nbuild=%s\npublish=%s\n' "$upstream" "$tag" "$build" "$publish" >> "$GITHUB_OUTPUT"
           echo "Upstream $upstream, release $tag (exists: $exists), build: $build, publish: $publish"
 
@@ -70,27 +61,6 @@ jobs:
         env:
           UPSTREAM: ${{ steps.plan.outputs.upstream }}
         run: ./apply-patches.sh "$UPSTREAM" src
-
-      - name: Open an issue when they don't
-        if: failure() && steps.plan.outputs.build == 'true' && github.event_name == 'schedule'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          UPSTREAM: ${{ steps.plan.outputs.upstream }}
-        run: |
-          title="Patches no longer apply to $UPSTREAM"
-          gh issue list -R "$GITHUB_REPOSITORY" --state open --search "$title in:title" --json number --jq length | grep -qx 0 || exit 0
-          gh issue create -R "$GITHUB_REPOSITORY" --title "$title" \
-            --body "The scheduled build stopped at \`apply-patches.sh $UPSTREAM\`: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Rebase patches/ onto $UPSTREAM, bump REVISION if the result differs, and push."
-
-      # GitHub stops the schedule of a public repo after 60 days without activity.
-      - name: Keep the schedule alive
-        if: github.event_name == 'schedule'
-        run: |
-          [ $(( $(date +%s) - $(git log -1 --format=%ct) )) -lt $(( 45 * 86400 )) ] && exit 0
-          git config user.name "github-actions[bot]"
-          git config user.email "41898729+github-actions[bot]@users.noreply.github.com"
-          git commit --allow-empty -m "Keep the release schedule alive"
-          git push origin HEAD:norish
 
   test:
     needs: plan
